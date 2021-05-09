@@ -29,7 +29,8 @@ f.plot('p')
 f.plot('vx')
 f.plot('vz')
 
-# plot animation of field variable evolution
+# plot animation of field variable evolution (requires working update method)
+f._generateFrames()
 f.saveAnimation('rho')
 ```
 
@@ -38,7 +39,7 @@ f.saveAnimation('rho')
 1. Write the update function
     1. write enforceBCs (Sara)
     2. write predictor steps (Ali and Pete *and Kory*)
-        0. note: use corrected dt evaluated at t (from previous corrector step)
+        *note: use corrected dt evaluated at t (from previous corrector step)*
         1. get dvar/dt with forward spacial derivative at t (eq. 16)
         2. get predicted variables "varp" at t+dt (eq. 17)
         3. enforce BCs on predicted variables
