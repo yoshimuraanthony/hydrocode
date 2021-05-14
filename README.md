@@ -8,37 +8,29 @@ subject to Rayleigh Taylor (RT) instability.  Algorithm based on lecture 16.
 * z-direction: hard boundaries a distance *d* above and below the interface
 * x-direction: periodic or reflective boundary conditions
 
-## Usage
+## Basic usage
 
 ```
+from RT import Fluid
+
 # initialize fluid class
 f = Fluid()
 
-# time evolve the fluid
-for n in range(Nt):
-    f.update()
-
-# get field variable values
-rho_a2 = f.getRho()
-p_a2 = f.getP()
-v_a3 = f.getV()
-
 # plot field variable values as heatmaps
 f.plot('rho')
-f.plot('p')
-f.plot('vx')
-f.plot('vz')
 
-# plot animation of field variable evolution (requires working update method)
-f._generateFrames()
+# plot animation of field variable evolution
+f.generateFrames()
 f.saveAnimation('rho')
-```
 
+# get field variable from specific dump
+rho3_a2 = f.rho_list[3]
+```
 ## To do (in descending priority)
 
 1. Write the update function
     1. write enforceBCs (Sara)
-    2. write predictor steps (Ali and Pete *and Kory*)
+    2. write predictor steps (Ali and Pete)
         *note: use corrected dt evaluated at t (from previous corrector step)*
         1. get dvar/dt with forward spacial derivative at t (eq. 16)
         2. get predicted variables "varp" at t+dt (eq. 17)
@@ -53,7 +45,7 @@ f.saveAnimation('rho')
         1. Mass (self.rho_a2.sum())
         2. Momentum
         3. Energy
-2. Testing script (*Kory*)
+2. Testing scripts (Kory)
 3. Create a movie plot
     1. show time in corner
     2. take scalar field variable as argument

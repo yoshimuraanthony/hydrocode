@@ -1,4 +1,4 @@
-from numpy import array, arange, zeros, ones, linspace, newaxis
+from numpy import array, arange, zeros, ones, linspace, newaxis, where
 from numpy import exp, log, cosh, sinh, tanh, cos, sin, tan, sqrt, ceil
 from numpy import pi
 from numpy import roll  # in place of update function
@@ -32,7 +32,7 @@ https://google.github.io/styleguide/pyguide.html
 """
 
 class Fluid(object):
-    """Discritized classical 2D RT fluid with periodic boundary conditions
+    """Discretized classical 2D RT fluid with periodic boundary conditions
 
     Attributes:
         rho, p: scalar field variables
@@ -44,7 +44,7 @@ class Fluid(object):
             rhoh=1., rhol=.5, L0=.02,  # initial density profile parameters
             pd=1.,  # Pa, initial pressure parameters
             vpert=.01,  # m/s
-            tdump=.001, ttot=.1, tscale = 1,  # s
+            tdump=.1, ttot=1.85, tscale=1,  # s
             ):
         """Initialize equilibrium 2D field variables.
 
@@ -92,31 +92,32 @@ class Fluid(object):
         self.setRho0() 
         self.setP0()
 
-        # initial primitive field variables
+        # initial primitive field variables: rho, p, and v
         self.rho_a2 = self.rho0_a1 + zeros((Nx, Nz))
         self.p_a2 = self.p0_a1 + zeros((Nx, Nz))
         self.v_a3 = zeros((2, Nx, Nz))  # 2D vector field
-#         self.perturb()
+        self.perturb()
         
         # initial conservative field variables
-        self.pi_a2 = zeros((Nx, Nz)) # z-derivative of pressure
-        self._setG()
-        self._setF()
-        self._setW()
-        self._setQ()
-        self._setSG()
-        self._setSW()
-#         self._enforceBCs()
+        self.G_a3 = self._getG(self.rho_a2)
+        self.W_a2 = self._getW(self.rho_a2)
+        self.G_a3, self.rho_a2, self.W_a2 = self._enforceBCs(
+                self.G_a3, self.rho_a2, self.W_a2)
+
+        self.F_a4 = self._getF(self.rho_a2)
+        self.Q_a3 = self._getQ(self.rho_a2)
+        self.SG_a3 = self._getSG(self.rho_a2)
+        self.SW_a2 = self._getSW(self.rho_a2)
 
         # time step and time elapsed
         self.tscale = tscale
-        self._setdt()
-        self.elapsed = 0.
-        self.tdump = tdump
-        self.ndumps = 0
-        self.nextdump = 0.
         self.ttot = ttot
+        self.tdump = tdump
+        self.elapsed = 0.
+        self.nextdump = 0.
         self.nsteps = 0
+        self.ndumps = 0
+        self._setdt()
 
         # animation frames
         self.rho_list = []
@@ -132,23 +133,17 @@ class Fluid(object):
         self.omega_list = []
 
         # conservation tests
-        Mass_i = self.getMass()
-        Energy_i = self.getEnergy()
-#         Momentum_i = self.getMomentum()  # component
-        # corrected conservatives and predicted primitives should be set in
-        #    _setPredictedVars
-        # predicted conservatives and corrected primitives should be set in
-        #    _setCorrectedVars
-#        # predicted variables
-#         self.pv_a3 = self.v_a3.copy()
-#         self.prho_a2 = self.rho_a2.copy() 
-#         self.pp_a2 = self.p_a2.copy()
-#         self.pG_a3 = self.G_a3.copy()
-#         self.pF_a4 = self.F_a4.copy()
-#         self.pW_a2 = self.W_a2.copy()
-#         self.pQ_a3 = self.Q_a3.copy()
-#         self.psG_a3 = self.sG_a3.copy()
-#         self.psW_a2 = self.sW_a2.copy()
+        self.Mass_i = self.getMass()
+        self.Energy_i = self.getEnergy()
+
+        # history of quantities
+        self.mass_list = [self.Mass_i]
+        self.energy_list = [self.Energy_i]
+        
+        # corrector step needs previous and predicted rho, G, and W
+        self.prho_a2 = self.rho_a2.copy() 
+        self.pG_a3 = self.G_a3.copy()
+        self.pW_a2 = self.W_a2.copy()
 
     # ---------------------- initialize primitvies -----------------------
     def setRho0(self):
@@ -159,21 +154,20 @@ class Fluid(object):
 
     def setP0(self):
         """Set equilibrium p0(z) = p0(d) + Int(rho0, z) (lec 16 sl 4)."""
-        pdiff = (self.rhoh + self.rhol)*self.d*self.g
-        p0_list = [self.pd + pdiff]
-        for j, rho in enumerate(self.rho0_a1[:-1]):
-            p0j1 = p0_list[-1] - rho*self.g*self.dz
-            p0_list.append(p0j1)
-        self.p0_a1 = array(p0_list)
+        self.p0_a1 = self.pd + self.g / 2 * ( \
+                (self.rhoh-self.rhol) * self.L0 \
+                * log((cosh(self.d/self.L0) / cosh(self.z_a1/self.L0))) \
+                + (self.rhoh+self.rhol) * (self.d-self.z_a1)
+                )
 
     def perturb(self):
         """Perturb the field variables from equilibrium."""
-        k = pi/self.xmax
-        x_a2 = self.x_a1[:, newaxis]
+        k = pi/self.xmax/2
+        x_a2 = self.x_a1[:, newaxis] + self.xmax
         z_a2 = self.z_a1[newaxis, :]
         self.v_a3[0] = self.vpert*sin(k*x_a2) \
                 * exp(-k*abs(tanh(z_a2/self.L0)*z_a2)) \
-                * tanh(z_a2)
+                * tanh(z_a2/self.L0)
         self.v_a3[1] = self.vpert*cos(k*x_a2) \
                 * exp(-k*abs(tanh(z_a2/self.L0)*z_a2)) \
 
@@ -214,7 +208,7 @@ class Fluid(object):
             var_a2 = self.v_a3[0]
             label = "$v_x$ (m/s)"
         elif 'v' in var and 'z' in var:
-            var_a2 = self.v_a3[0]
+            var_a2 = self.v_a3[1]
             label = "$v_z$ (m/s)"
         else:
             print('unrecognized variable')
@@ -255,126 +249,124 @@ class Fluid(object):
         """Return copy of vz at current time step."""
         return self.v_a3.copy()[1]
 
-    # ----------------------- set field variblse -------------------------
-    def _setv(self):
+    # ----------------------- get field variables -------------------------
+    def _getv(self, G_a3, rho_a2):
         """Set velocity from conservatives (typed eq 11)."""
-        self.v_a3 = self.G_a3 / self.rho_a2
+        return G_a3 / rho_a2
 
-    def _setp(self):
+    def _getp(self, G_a3, rho_a2, W_a2):
         """Set pressure from conservatives (typed eq 11)."""
-        self.p_a2 = (self.gamma - 1) \
-                * (self.W_a2 - (self.G_a3**2).sum(0)/self.rho_a2/2)
+        return (self.gamma - 1) * (W_a2 - (G_a3**2).sum(0)/rho_a2/2)
 
-    def _setG(self):
+    def _getG(self, rho_a2):
         """Set momentum from primitives (lec 16 sl 14)."""
-        self.G_a3 = self.rho_a2 * self.v_a3
+        return rho_a2 * self.v_a3
 
-    def _setF(self):
+    def _getF(self, rho_a2):
         """Set momentum flux from primitives (lec 16 sl 14)."""
-        self.F_a4 =  self.rho_a2[newaxis, newaxis, :, :] \
+        F_a4 =  rho_a2[newaxis, newaxis, :, :] \
                 * self.v_a3[newaxis, :, :, :] \
                 * self.v_a3[:, newaxis, :, :]
-        self.F_a4[0, 0] += self.p_a2
-        self.F_a4[1, 1] += self.p_a2
+        F_a4[0, 0] += self.p_a2
+        F_a4[1, 1] += self.p_a2
+        return F_a4
 
-    def _setW(self):
+    def _getW(self, rho_a2):
         """Set energy from primitives (lec 16 sl 14)."""
-        self.W_a2 = self.p_a2 / (self.gamma-1) \
-                + self.rho_a2 * (self.v_a3**2).sum(0) / 2
+        return self.p_a2 / (self.gamma-1) \
+                + rho_a2 * (self.v_a3**2).sum(0) / 2
 
-    def _setQ(self):
+    def _getQ(self, rho_a2):
         """Set energy flux from primitives (lec 16 sl 14)."""
-        self.Q_a3 = self.v_a3 \
+        return self.v_a3 \
                 * (self.gamma*self.p_a2 / (self.gamma-1) \
-                + self.rho_a2 * (self.v_a3**2).sum(0) / 2)
+                + rho_a2 * (self.v_a3**2).sum(0) / 2)
 
-    def _setSG(self):
+    def _getSG(self, rho_a2):
         """Set momentum source from primitives (lec 16 sl 17)."""
-        self.SG_a3 = zeros((2, self.Nx, self.Nz))
-        self.SG_a3[1] = -self.g * self.rho_a2  # g is nonzero only in z-direction
+        SG_a3 = zeros((2, self.Nx, self.Nz))
+        SG_a3[1] = -self.g * rho_a2  # g is nonzero only in z-direction
+        return SG_a3
 
-    def _setSW(self):
+    def _getSW(self, rho_a2):
         """Set energy source from primitives (lec 16 sl 17)."""
-        self.SW_a2 = -self.g * self.rho_a2 * self.v_a3[1]
-
-    def _setPi(self):
-        """Return derivative of pressure in z"""
-        Gz_a2 = self.v_a3[1,:,:]*self.rho_a2
-        self.pi_a2 = self.p_a2 + Gz_a2**2/self.rho_a2
-
-    def _setdt(self):
-        """Set time step in seconds."""
-        cs_a2 = sqrt(self.gamma*self.p_a2/self.rho_a2)
-        vmag_a2 = sqrt((self.v_a3**2).sum(0))
-        self.dt = self.dmin / (cs_a2 + vmag_a2).max() / 2 * self.tscale
+        return -self.g * rho_a2 * self.v_a3[1]
 
     # ------------------ enforce boundary conditions ---------------------
-    def _enforceBCs(self):
-        """Enforce boundary conditions. Reflective Boundary Conditions"""
+    def _enforceBCs(self, G_a3, rho_a2, W_a2):
+        """Enforce reflective boundary conditions.
+
+        Act on rho, G, W, and pi after they are updated
+        """
         # Define some commonly used variables
-        Nx = self.Nx 
-        Nz = self.Nz
         g  = self.g
         dz = self.dz
         gamma = self.gamma
 
-        # Save initial mass, energy, and momentum
-        Mass_i = self.getMass()
-        Energy_i = self.getEnergy()
-        Momentum_i = self.G_a3[0].sum() # apply for x-direction
-        # variables altered by end of enforceBCs:
-
-        # (1) self.v_a3, (2) self_W_a2, (3) self.rho_a2, and (4) self.pi_a2
         # Apply Reflective Boundary Conditions in the x-direction
         # i = 0 BCs
-        self.G_a3[0,0,:] = -self.G_a3[0,1,:]
-        self.G_a3[1,0,:] = self.G_a3[1,1,:]
-        self.W_a2[0,:] = self.W_a2[1,:]
-        self.rho_a2[0,:] = self.rho_a2[1,:]
+        G_a3[0,0,:] = -G_a3[0,1,:]
+        G_a3[1,0,:] = G_a3[1,1,:]
+        W_a2[0,:] = W_a2[1,:]
+        rho_a2[0,:] = rho_a2[1,:]
 
         # i = Nx+1 BCs
-        self.G_a3[0,-1,:] = -self.G_a3[0,-2,:]
-        self.G_a3[1,-1,:] = self.G_a3[1,-2,:]
-        self.W_a2[-1,:] = self.W_a2[-2,:]
-        self.rho_a2[-1,:] = self.rho_a2[-2,:]
+        G_a3[0,-1,:] = -G_a3[0,-2,:]
+        G_a3[1,-1,:] = G_a3[1,-2,:]
+        W_a2[-1,:] = W_a2[-2,:]
+        rho_a2[-1,:] = rho_a2[-2,:]
 
         # Apply Rigid Wall Boundary Conditions in the z-direction
         # j = 0 BCs
-        self.G_a3[0,:,0] = -self.G_a3[0,:,1]
-        self.G_a3[1,:,0] = self.G_a3[1,:,1]
-        self.rho_a2[:,0] = self.rho_a2[:,1]
-        self.pi_a2[:,0] = self.pi_a2[:,1] + self.rho_a2[:,1]*g*dz
-
-        # w(i,0)  =  ... ###
-        Gx2 = self.G_a3[0,:,0]**2
-        Gz2 = self.G_a3[1,:,0]**2
-        term1 = self.pi_a2[:,1] + self.rho_a2[:,1]*g*dz \
-                - Gz2/self.rho_a2[:,0]
-        term2 = Gx2 + Gz2 
-        self.W_a2[:,0] = term1/(gamma - 1.) + term2/2./self.rho_a2[:,0]
+        G_a3[0,:,0] = G_a3[0,:,1]
+        G_a3[1,:,0] = -G_a3[1,:,1]
+        rho_a2[:,0] = rho_a2[:,1]
 
         # j = Nz+1 BCs
-        self.G_a3[0,:,-1] = -self.G_a3[0,:,-2]
-        self.G_a3[1,:,-1] = self.G_a3[1,:,-2]
-        self.rho_a2[:,-1] = self.rho_a2[:,-2]
-        self.pi_a2[:,-1] = self.pi_a2[:,-2] + self.rho_a2[:,-2]*g*dz
+        G_a3[0,:,-1] = G_a3[0,:,-2]
+        G_a3[1,:,-1] = -G_a3[1,:,-2]
+        rho_a2[:,-1] = rho_a2[:,-2]
+
+        # initialize pi
+        p_a2 = (gamma - 1) * (W_a2 - (G_a3**2).sum(0)/rho_a2/2)
+        pi_a2 = p_a2 + G_a3[1]**2/rho_a2
+        pi_a2[:,0] = pi_a2[:,1] + rho_a2[:,1]*g*dz
+        pi_a2[:,-1] = pi_a2[:,-2] - rho_a2[:,-2]*g*dz
+
+        # w(i,0)  =  ... ###
+        Gx2 = G_a3[0,:,0]**2
+        Gz2 = G_a3[1,:,0]**2
+        term1 = pi_a2[:,0] - Gz2/rho_a2[:,0]
+        term2 = Gx2 + Gz2 
+        W_a2[:,0] = term1/(gamma - 1.) + term2/2./rho_a2[:,0]
 
         # w(i,-1)  =  ... ###
-        Gx2 = self.G_a3[0,:,-1]**2
-        Gz2 = self.G_a3[1,:,-1]**2
-        term1 = self.pi_a2[:,-2] + self.rho_a2[:,-2]*g*dz \
-                - Gz2/self.rho_a2[:,-1]
+        Gx2 = G_a3[0,:,-1]**2
+        Gz2 = G_a3[1,:,-1]**2
+        term1 = pi_a2[:,-1] - Gz2/rho_a2[:,-1]
         term2 = Gx2 + Gz2 
-        self.W_a2[:,-1] = term1/(gamma - 1.) + term2/2./self.rho_a2[:,-1]
+        W_a2[:,-1] = term1/(gamma - 1.) + term2/2./rho_a2[:,-1]
+
+        return G_a3, rho_a2, W_a2
             
     # ----------------------- check conservation -------------------------
     def getMass(self):
         """Return total mass in kg."""
         return self.rho_a2.sum()
 
+    def getPE(self):
+        """Total potential energy"""
+        PE = (self.rho_a2*self.z_a1*self.g).sum()
+        return PE
+    
+    def getKE(self):
+        """Total kinetic energy"""
+        KE = self.W_a2.sum()
+        return KE
+    
     def getEnergy(self):
-        """Return total energy in J."""
-        return 1.
+        """Return total energy"""        
+        return self.getPE() + self.getKE()
 
     def getOmega(self):
         """Return vorticity magnitude"""
@@ -382,154 +374,208 @@ class Fluid(object):
         dvxdz_a2 = (self.v_a3[0,:-1,1:] - self.v_a3[0,:-1,:-1]) / self.dz
         return abs(dvzdx_a2 - dvxdz_a2).sum()
 
-    def checkConservation():
+    def checkConservation(self, tol=1e-5):
         """Check for Conservation of mass, energy, and momentum."""
         Mass_f = self.getMass()
         Energy_f = self.getEnergy()
         Momentum_f = self.G_a3[0].sum()
 
-        if abs(Mass_f - Mass_i) < 1e-8:
-            print('Total Mass is Conserved')
-        else:
-            print('Total Mass not Conserved by ', Mass_f - Mass_i)
+        deltaM = (Mass_f - self.Mass_i) / self.Mass_i
+        deltaE = (Energy_f - self.Energy_i) / self.Energy_i
         
-        if abs(Energy_f - Energy_i) < 1e-8:
-            print('Total Energy is Conserved')
+        if abs(deltaM) < tol:
+            print('  Total Mass is Conserved')
         else:
-            print('Total Energy not Conserved by ', Energy_f - Energy_i)
+            print('  Total Mass not Conserved by {:.3g}%'.format(100*deltaM))
         
-        if abs(Momentum_f - Momentum_i) < 1e-8:
-            print('Total Momentum is Conserved')
+        if abs(deltaE) < tol:
+            print('  Total Energy is Conserved')
         else:
-           print('Total Momentum not Conserved by ', Momentum_f - Momentum_i)
+            print('  Total Energy not Conserved by {:.3g}%'.format(100*deltaE))
+        
+        self.mass_list.append(Mass_f)
+        self.energy_list.append(Energy_f)
 
-    # -------------------- advance field varialbes -----------------------
+    # -------------------- advance field variables -----------------------
+    def _setdt(self):
+        """Set time step in seconds."""
+        cs_a2 = sqrt(self.gamma*self.p_a2/self.rho_a2)
+        vmag_a2 = sqrt((self.v_a3**2).sum(0))
+        self.dt = self.dmin / (cs_a2 + vmag_a2).max() / 2 * self.tscale
+
     def _setPredictedVars(self):
         """Set "predictor" field variables.
 
-        Update using information about momentum at time t (lect 16 sl 14).
+        Update using primitives at current timestep (lect 16 sl 14).
         """
-        # ACD: rewrite this with the self.pVars -- no return 
-        # ACD: also corrector step for primitives 
-        # ACD: make sure _set functions store COPIES of variables
-
-        # advance field variables with forward differences
-        self.rho_a2[:-1,:-1] = self.rho_a2[:-1,:-1] \
+        # advance conservatives with forward differences
+        self.prho_a2[:-1,:-1] = self.rho_a2[:-1,:-1] \
             + self.dt * ( \
                 - (self.G_a3[0,1:,:-1] - self.G_a3[0,:-1,:-1]) / self.dx \
                 - (self.G_a3[1,:-1,1:] - self.G_a3[1,:-1,:-1]) / self.dz \
+                + 0
             )
     
-        self.G_a3[:,:-1,:-1] = self.G_a3[:,:-1,:-1] \
+        self.pG_a3[:,:-1,:-1] = self.G_a3[:,:-1,:-1] \
             + self.dt * ( \
                 - (self.F_a4[0,:,1:,:-1] - self.F_a4[0,:,:-1,:-1]) / self.dx \
                 - (self.F_a4[1,:,:-1,1:] - self.F_a4[1,:,:-1,:-1]) / self.dz \
                 + self.SG_a3[:,:-1,:-1]
             )
 
-        self.W_a2[:-1,:-1] = self.W_a2[:-1,:-1] \
+        self.pW_a2[:-1,:-1] = self.W_a2[:-1,:-1] \
             + self.dt * ( \
                 - (self.Q_a3[0,1:,:-1] - self.Q_a3[0,:-1,:-1]) / self.dx \
                 - (self.Q_a3[1,:-1,1:] - self.Q_a3[1,:-1,:-1]) / self.dz \
                 + self.SW_a2[:-1,:-1]
             )
-#         self._enforceBCs()
+
+        # enforce boundary conditions
+        self.pG_a3, self.prho_a2, self.pW_a2 = self._enforceBCs(
+                self.pG_a3, self.prho_a2, self.pW_a2)
 
         # advance remaining primitives
-        self._setv()
-        self._setp()
-#         self._enforceBCs()
+        self.v_a3 = self._getv(self.pG_a3, self.prho_a2)
+        self.p_a2 = self._getp(self.pG_a3, self.prho_a2, self.pW_a2)
 
         # advance remaining conservatives
-        self._setF()
-        self._setQ()
-        self._setSG()
-        self._setSW()
-#         self._enforceBCs()
+        self.F_a4 = self._getF(self.prho_a2)
+        self.Q_a3 = self._getQ(self.prho_a2)
+        self.SG_a3 = self._getSG(self.prho_a2)
+        self.SW_a2 = self._getSW(self.prho_a2)
 
     def _setCorrectedVars(self):
-        """Set "corrected" variables.
+        """Set "corrector" variables.
 
         Update field vars with avg time derivatives (lect 16 sl 15).
         """
-        # ACD: move this to a predictor function
-        # information about the spatial grid and current time step
-        Nx = self.Nx 
-        Nz = self.Nz 
-        dt = self._setdt()
-
-        # current field variables
-        rho = self.getRho()     
-        G = self._setG()        
-        W = self._setW()        
-        F = self._setF()
-        Q = self._setQ() 
-
-        # predicted field variables for the current time step 
-        predict_rho, predict_G, predict_W = self._setPVars
+        # advance conservatives with forward differences
+        self.rho_a2[1:,1:] = 0.5 * (self.rho_a2[1:,1:] + self.prho_a2[1:,1:]) \
+            + (self.dt / 2.0) * ( \
+                - (self.pG_a3[0,1:,1:] - self.pG_a3[0,:-1,1:]) / self.dx \
+                - (self.pG_a3[1,1:,1:] - self.pG_a3[1,1:,:-1]) / self.dz \
+                + 0
+            )
         
-        # ACD WIP
-        rho[1:,1:] = 0.5 * ( (predict_rho[1:,1:] + rho[1:,1:]) - (dt/self.dx) * (predict_G[0,0:Nx-1,0:Nz-1] - predict_G[0,0:Nx-1,0:Nz-1]) )
-        pass
+        self.G_a3[:,1:,1:] = 0.5 * (self.G_a3[:,1:,1:] + self.pG_a3[:,1:,1:]) \
+            + (self.dt / 2.0) * ( \
+                - (self.F_a4[0,:,1:,1:] - self.F_a4[0,:,:-1,1:]) / self.dx \
+                - (self.F_a4[1,:,1:,1:] - self.F_a4[1,:,1:,:-1]) / self.dz \
+                + self.SG_a3[:,1:,1:]
+            )
+
+        self.W_a2[1:,1:] = 0.5 * (self.W_a2[1:,1:] + self.pW_a2[1:,1:]) \
+            + (self.dt / 2.0) * ( \
+                - (self.Q_a3[0,1:,1:] - self.Q_a3[0,:-1,1:]) / self.dx \
+                - (self.Q_a3[1,1:,1:] - self.Q_a3[1,1:,:-1]) / self.dz \
+                + self.SW_a2[1:,1:]
+            )
+
+        # enforce boundary conditions
+        self.G_a3, self.rho_a2, self.W_a2 = self._enforceBCs(
+                self.G_a3, self.rho_a2, self.W_a2)
+
+        # advance remaining primitives
+        self.v_a3 = self._getv(self.G_a3, self.rho_a2)
+        self.p_a2 = self._getp(self.G_a3, self.rho_a2, self.W_a2)
+
+        # advance remaining conservatives
+        self.F_a4 = self._getF(self.rho_a2)
+        self.Q_a3 = self._getQ(self.rho_a2)
+        self.SG_a3 = self._getSG(self.rho_a2)
+        self.SW_a2 = self._getSW(self.rho_a2)
 
     def update(self):
         """Update field vars with (lect 16 sl 12)."""
-        # store animation frames
-        if self.elapsed >= self.nextdump:
-
-            # primitives
-            self.rho_list.append(self.getRho())
-            self.p_list.append(self.getP())
-            self.vx_list.append(self.getVx())
-            self.vz_list.append(self.getVz())
-
-            # conservatives
-            self.G_list.append(self.G_a3.copy())
-            self.W_list.append(self.W_a2.copy())
-
-            # debugging / sanity check
-            self.omega_list.append(self.getOmega())  # vorticity
-            self.mass_list.append(self.getMass())
-
-            # dumps
-            self.nextdump += self.tdump
-            self.tdump_list.append(self.elapsed)
-            self.ndumps += 1
-
         self._setPredictedVars()
+        self._setCorrectedVars()
         self.elapsed += self.dt
         self.nsteps += 1
 
-        # numerical instability leads to p < 0, making dt imaginary
-        try:
-            self._setdt()
-        except RuntimeWarning:
-            print('negative pressure')
-            print('elapsed = {}'.format(self.elapsed))
-            print('  nsteps = {}'.format(self.nsteps))
-            print('  ndumps = {}'.format(self.ndumps))
-            print('  dt = {}'.format(self.dt))
-            print('  rhomax = {}, rhomin={}'.format(self.rho_a2.max(),
-                self.rho_a2.min()))
-            print('  pmax = {}, pmin={}'.format(self.p_a2.max(),
-                self.p_a2.min()))
-            print('  vxmax = {}, vxmin={}'.format(self.v_a3[0].max(),
-                self.v_a3[0].min()))
-            print('  vzmax = {}, vzmin={}'.format(self.v_a3[1].max(),
-                self.v_a3[1].min()))
-            print('  Gxmax = {}, Gxmin={}'.format(self.G_a3[0].max(),
-                self.G_a3[0].min()))
-            print('  Gzmax = {}, Gzmin={}'.format(self.G_a3[1].max(),
-                self.G_a3[1].min()))
-            print('  Wmax = {}, Wmin={}'.format(self.W_a2.max(),
-                self.W_a2.min()))
-
     # -------------------- generate and save movie ----------------------
+    def dump(self):
+        """Dump info to lists"""
+        # primitives
+        self.rho_list.append(self.getRho())
+        self.p_list.append(self.getP())
+        self.vx_list.append(self.getVx())
+        self.vz_list.append(self.getVz())
+
+        # conservatives
+        self.G_list.append(self.G_a3.copy())
+        self.W_list.append(self.W_a2.copy())
+
+        # debugging / sanity check
+        self.omega_list.append(self.getOmega())  # vorticity
+        self.mass_list.append(self.getMass())
+        self.checkConservation()
+
+        # dumps
+        self.nextdump += self.tdump
+        self.tdump_list.append(self.elapsed)
+        self.ndumps += 1
+
     def generateFrames(self):
-        """Store primitives at every tdump."""
-        while self.elapsed < self.ttot:
+        """Evolve system, dump at every tdump, stop at ttot."""
+        while self.elapsed <= self.ttot:
+            if self.elapsed >= self.nextdump:
+                print('time elapsed = {:.3g} s'.format(self.elapsed))
+                self.dump()
+
             self.update()
 
+            # numerical instability leads to p < 0, making dt imaginary
+            try:
+                self._setdt()
+            except RuntimeWarning:
+                print('imaginary time step')
+                print('  last dt = {:.6g} s'.format(self.dt))
+
+                rhomin = self.rho_a2.min()
+                rhomax = self.rho_a2.max()
+                rhomini_a1, rhominj_a1 = where(self.rho_a2 == rhomin)
+                rhomaxi_a1, rhomaxj_a1 = where(self.rho_a2 == rhomax)
+                rhominCoords_list = [(i, j) for i,j
+                        in zip(rhomini_a1, rhominj_a1)]
+                rhomaxCoords_list = [(i, j) for i,j
+                        in zip(rhomaxi_a1, rhomaxj_a1)]
+
+                print('  rhomin = {:.6g} kg/m^3\n    at {},'
+                    '\n  rhomax = {:.6g} kg/m^2\n    at {}'.format(
+                        rhomin, rhominCoords_list, rhomax, rhomaxCoords_list))
+
+                pmin = self.p_a2.min()
+                pmax = self.p_a2.max()
+                pmini_a1, pminj_a1 = where(self.p_a2 == pmin)
+                pmaxi_a1, pmaxj_a1 = where(self.p_a2 == pmax)
+                pminCoords_list = [(i, j) for i,j
+                        in zip(pmini_a1, pminj_a1)]
+                pmaxCoords_list = [(i, j) for i,j
+                        in zip(pmaxi_a1, pmaxj_a1)]
+
+                print('  pmin = {:.6g} Pa\n    at {},'
+                    '\n  pmax = {:.6g} Pa\n    at {}'.format(
+                    pmin, pminCoords_list, pmax, pmaxCoords_list))
+
+                print('  vxmin = {:.6g}, vxmax = {:.6g} m/s'.format(
+                    self.v_a3[0].min(), self.v_a3[0].max()))
+                print('  vzmin = {:.6g}, vzmax = {:.6g} m/s'.format(
+                    self.v_a3[1].min(), self.v_a3[1].max()))
+                print('  Gxmin = {:.6g}, Gxmax = {:.6g} kg m/s'.format(
+                    self.G_a3[0].min(), self.G_a3[0].max()))
+                print('  Gzmin = {:.6g}, Gzmax = {:.6g} kg m/s'.format(
+                    self.G_a3[1].min(), self.G_a3[1].max()))
+                print('  Wmin = {:.6g}, Wmax = {:.6g} J'.format(
+                    self.W_a2.min(), self.W_a2.max()))
+                break
+
+            # dump at last frame
+            if self.ttot < self.elapsed:
+                print('Reached ttot successfully. Nice job!')
+                break
+
+        self.dump()
+        print('time elapsed = {:.6g} s'.format(self.elapsed))
         print('nsteps = {}'.format(self.nsteps))
         print('ndumps = {}'.format(self.ndumps))
 
@@ -605,6 +651,23 @@ class Fluid(object):
         ani = FuncAnimation(self.fig, self._animate, frames=self.ndumps,
                 interval=interval)
         ani.save(outfile, 'ffmpeg')
+        plt.show()
+        
+    def plot_conservation(self):
+        """ Plots Mass, Energy, and Momentum conservation errors """
+        
+        plt.plot([100*(x - self.Mass_i)/self.Mass_i
+            for x in self.mass_list])
+        plt.title("Mass Error")
+        plt.xlabel("Iteration")
+        plt.ylabel("Percent Error")
+        plt.show()
+        
+        plt.plot([100*(x - self.Energy_i)/self.Energy_i
+            for x in self.energy_list])
+        plt.title("Energy Error")
+        plt.xlabel("Iteration")
+        plt.ylabel("Percent Error")
         plt.show()
 
 
@@ -694,7 +757,19 @@ def getHeaviside(z, rhoh=1, rhol=0):
 #                 + (self.rhoh+self.rhol) * (self.d-self.z_a1)
 #                 )
 
+# p0(z) from forward difference
+#         pdiff = (self.rhoh + self.rhol)*self.d*self.g
+#         p0_list = [self.pd + pdiff]
+#         for j, rho in enumerate(self.rho0_a1[:-1]):
+#             p0j1 = p0_list[-1] - rho*self.g*self.dz
+#             p0_list.append(p0j1)
+#         self.p0_a1 = array(p0_list)
+
 # p0(z) from central difference
+#         pdiff = (self.rhoh + self.rhol)*self.d*self.g
+#         p0_list = [self.pd + pdiff]
 #         for j in range(self.Nz-1):
 #             p0j1 = p0_list[-1] - 0.5*(self.rho0_a1[j+1]+self.rho0_a1[j]) \
 #                     *self.g*self.dz
+#         self.p0_a1 = array(p0_list)
+
